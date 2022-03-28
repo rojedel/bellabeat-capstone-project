@@ -1,0 +1,315 @@
+---
+title: "Bellabeat data analysis"
+author: "Edgardo Rojas"
+date: "3/1/2022"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  pdf_document:
+    toc: yes
+  cleanrmd::html_document_clean:
+    theme: new.css
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+r = getOption("repos")
+r["CRAN"] = "http://cran.us.r-project.org"
+options(repos = r)
+install.packages("weatherData")
+```
+
+## Bellabeat smart device trend data analysis
+
+I will document all my data cleaning and manipulating process.
+Then I will add a proper description to the analysis and the reasons for why it was made.
+
+```{r Loading all necessary libraries., results="hide", warning=FALSE}
+library(tidyverse)
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(cleanrmd)
+```
+
+## Smart device activity and heart rate minute level data
+From a previous glance at the data in excel, I inferred that activity level data and heart rate data would be the most useful to detect certain usage trends. From this assumption I will now work on loading said data into my R environment. I will import these 2 .csv files into separate dataframes for now.
+
+
+```{r Loading the data, echo=FALSE}
+
+dailyActivity <- read.csv("dailyActivity_merged.csv", header = TRUE)
+heartRate <- read.csv("heartrate_seconds_merged.csv", header = TRUE)
+METdata <- read.csv("minuteMETsNarrow_merged.csv", header = TRUE)
+
+```
+
+## Checking out the data
+Now that the data has been loaded, we can start reviewing it, identifying areas where it has to be prepared and cleaned properly.
+
+```{r Looking at the data}
+head(dailyActivity)
+head(heartRate)
+head(METdata)
+str(dailyActivity)
+str(METdata)
+
+```
+
+After reviewing the "dailyActivity" dataframe, I found that the ActivityDate column has a character type, instead of being a proper date type, this will cause issues later if it's not fixed now. The heartRate dataframe also has a Time column that has date-time data. It would be better to
+separate date and time into different columns to make things easier down the line.
+
+There is also the issue of a couple columns which are completely made up of null values and columns that are not of any benefit in having them in the dailyActitivy dataset. I will take care of removing useless columns too.
+
+
+```{r Cleaning the data}
+dailyActivity <- select(dailyActivity, -c(LoggedActivitiesDistance, SedentaryActiveDistance))
+dailyActivity <- mutate(dailyActivity, ActivityDate = mdy(ActivityDate))
+heartRate <- mutate(heartRate, Time = as.POSIXct(Time, format="%m/%d/%Y %I:%M:%S %p",tz=Sys.timezone()))
+heartRate <- mutate(heartRate, date = as.Date(Time), timeHMS = format(Time, format= "%I:%M:%S", tz=Sys.timezone()))
+heartRate <- mutate(heartRate, timeHMS = as.POSIXct(timeHMS, format="%m/%d/%Y %I:%M:%S", tz=Sys.timezone()))
+METdata <- mutate(METdata, ActivityMinute = as.POSIXct(ActivityMinute, format="%m/%d/%Y %I:%M:%S %p",tz=Sys.timezone()), activityDatetime = ActivityMinute)
+METdata <- mutate(METdata, time = format(ActivityMinute, format = " %H:%M:%S"), date = as.Date(activityDatetime))
+```
+
+Taking a look at the data.
+
+```{r Making sure everything is working the way it should}
+
+str(dailyActivity)
+str(heartRate)
+str(METdata)
+```
+
+Look like the changes have worked.
+
+## Data validation
+Now it is time to validate the data, this is a very important step because if there are mistakes in the data, it could lead to bigger issues when it comes to analyze it.
+
+I will start by counting unique ID's, to identify how many distinct users this data represents.
+
+```{r Data validation}
+
+sum(duplicated(dailyActivity)) ##No duplicated rows, that is good.
+n_distinct(dailyActivity$Id) ##There are 33 individual Id's, which means 33 different users.
+n_distinct(heartRate$Id) ##There are 14 individual Id's in the heartrate dataframe. 14 users.
+n_distinct(METdata$Id) ##Counted 33 individual Id's.
+
+```
+
+Knowing this is very helpful for doing further analysis.
+
+## Missing activity data
+There are obvious gaps in the daily activity data, it seems users did not record activity data in certain days. 
+Determining how we deal with this missing data is critical for this analysis so I have to 
+think hard on what is the best course of action. 
+
+Before taking a decision, I want to make a count of how many missing records
+there are for each different user ID. 
+
+```{r Counting missing records for each ID}
+missing_recordsDf <- dailyActivity %>%
+     group_by(Id) %>% 
+     summarise(missing_records = sum(TotalSteps==0))
+
+missing_recordsDf %>% arrange(missing_records)
+ ## There are only 18 users who did not miss a day of inputting their data.
+
+
+
+```
+
+It's very interesting to see how many users have the full information, 18 out of
+33 users have no missing days of data.
+
+For now I will ignore the users with incomplete data. This will make the process easier
+even though I still have to go back to try and find ways to incorporate that data,
+maybe even adding another public data source could be beneficial. 
+
+Now I will get rid of incomplete records in the dailyActivity dataframe. I will make
+a subset of this data to be able to go back in case I need to.
+
+```{r Subsetting dailyActivity}
+
+dailyActivitySubset <- dailyActivity %>% 
+  group_by(Id) %>% 
+  filter(sum(TotalSteps==0) == 0)
+
+```
+
+This one took a while to figure out...
+
+After that's done and we have the complete set of records for the users who did not miss any
+days, it is time to start analyzing it and start looking for trends!
+
+## Transforming the daily activity dataset
+Something that I would like to know is whether people are becoming more active by having their activity
+tracked data. For that, I will create another column in which I will give each day an activity rating, this activity
+rating will be calculated by aggregating activity minutes and giving each intensity a different value. In this case
+the values will be *5 points* for VeryActiveMinutes, *3 points* for FairlyActiveMinutes, and *1 point* for LightlyActiveMinutes. 
+
+```{r Daily Activity Rating}
+dailyActivitySubset <- mutate(dailyActivitySubset, DailyActivityRating = 
+                                (VeryActiveMinutes * 5) +
+                                (FairlyActiveMinutes * 3) +
+                                (LightlyActiveMinutes * 1))
+
+
+
+```
+
+## Statistical summary
+I think it's very important that I have an understanding of user behavior in order to make proper assumptions.
+In this case I will calculate basic user activity statistics focusing only on columns that I find interesting.
+
+I want to see the averages and distributions for TotalSteps, DailyActivityRating, TotalDistance and maybe a few others from additional
+data tables that I have yet to import.
+
+```{r User average}
+
+averageUserStatistics <- dailyActivitySubset %>%
+     group_by(Id) %>% 
+     summarise(averageTotalSteps = mean(TotalSteps), averageTotalDistance = mean(TotalDistance),
+               averageSedentaryMinutes = mean(SedentaryMinutes), averageRating = 
+                 mean(DailyActivityRating))
+
+
+```
+
+
+
+## Analyzing the data
+There are multiple things I could do a this point, to start off I want to plot the SedentaryMinutes for a small subset of users, because visualizing all data would only be messy and not useful.
+
+```{r Plotting TotalSteps}
+
+ggplot(dailyActivitySubset, aes(x = ActivityDate, y = SedentaryMinutes, group = Id, color = Id)) + geom_smooth(size=0.8) +
+  labs(title="Daily Sedentary Minutes", x="Date", y="Sedentary minutes per day")
+
+
+```
+
+This plot clearly shows a lot of variation, which obviously comes from the fact that every user leads
+a different life. Some might work physically demanding jobs and other people might work office jobs, which
+could be the reason for being Sedentary.
+
+Although the smoothed lines do trend to go slightly down, it's not enough to make assumptions at this point, and
+might even mean that my hypothesis was wrong. There's also the issue that this small sample size is definitely not
+enough to get anything very significant out of it.
+
+I need to look into the data in a different way in order to gain insights that might be useful for
+the marketing department.
+
+Now I think it would be a good idea to plot a histogram with the sedentary minutes to see the distribution.
+
+```{r Plotting a distribution of daily sedentary minutes}
+
+ggplot(dailyActivitySubset, aes(x=SedentaryMinutes, fill='orange' )) + geom_histogram(bins = 6)  +
+  labs(title="Distribution of daily sedentary minutes", x="Distribution", y="Count")
+```
+
+This plot does lend some insight into how active the people who submitted their data are. We
+can see a clear spike in the 1000-1250 minute bin, which equates to about 16-20 hours. 
+
+Knowing this, I can speculate that these highly sedentary users would be users who have jobs where they
+don't really have to move around much throughout the day. I think that this information could be potentially
+very important as a metric.
+
+There's a lot of studies that suggest that being sedentary could lead to a lot of potential health issues
+down the line. Something that can be implemented would be a reminder in the form of a notification, for when
+the user has spent a lot of time sitting still. This could help improve the user's health, which is a marketable
+feature.
+
+Next, let's explore more activity data. Starting off with visualizing the total distance traveled during the day.
+
+```{r Visualizing activity data}
+ggplot(dailyActivitySubset, aes(x=ActivityDate, y = TotalDistance, group = Id, color = Id)) + geom_smooth(size=0.8)  +
+  labs(title="Total distance traveled per day", x="Date", y="Total distance per day in miles.")
+
+```
+
+This plot doesn't show much of a trend, in fact, it seems that users consistently had similar total distances.
+One might even infer that tracking their distance traveled, helped them stay consistent, which is a common issue
+that prevents people from achieving their goals. 
+
+If I were to make the assumption that keeping record of your total daily distance traveled helps you
+keep consistent results, I would make the recommendation to the app team, to implement a system
+to set up your own goals where you can get rewarded in some way to keep adding to your streak, and staying consistent. This systems effectiveness to get results then in turn could make the app more marketable as a
+feature.
+
+More analysis has to be done on this, with a larger sample size, to verify this hypothesis. 
+
+
+Now I'm going to take a look at the METs data, which seems very interesting to me.
+
+"A MET is a ratio of your working metabolic rate relative to your resting metabolic rate. Metabolic rate is the rate of energy expended per unit of time. It’s one way to describe the intensity of an exercise or activity.
+
+One MET is the energy you spend sitting at rest — your resting or basal metabolic rate. So, an activity with a MET value of 4 means you’re exerting four times the energy than you would if you were sitting still.
+
+To put it in perspective, a brisk walk at 3 or 4 miles per hour has a value of 4 METs. Jumping rope, which is a more vigorous activity, has a MET value of 12.3." - To know more about METs click (here)[https://www.healthline.com/health/what-are-mets#definition]
+
+I made a subset of the data, to only visualize METs data of a singular user, in a singular day.
+
+```{r Plotting heartbeat data}
+METSubset <- subset(METdata, Id == '1503960366' & date == "2016-04-12")
+
+
+ggplot(METSubset, aes(x=activityDatetime, y = METs)) + geom_line() +
+  labs(title="METs in a Day", x="Time", y="MET")
+## This plot serves no purpose as it is, I have to find a way to extract information
+## in a general day point of view.
+
+ggplot(METSubset, aes(x=METs, fill ='blue' )) + geom_histogram()  +
+  labs(title="Distribution of daily sedentary minutes", x="Distribution", y="Count")
+
+```
+
+This plot is interesting, couple things can be observed. First is that the highest MET achieved during this user's day was at approximately 8:00 AM, suggesting early morning exercise. 
+
+I think it could be interesting and useful to know at what times users are the most active in average.
+First I'll calculate the maximum MET value achieved during everyday, and also at what time that occurred.
+
+```{r Calculating daily maximum METs achieved}
+
+highestMETs <- METdata %>%
+  group_by(Id, date) %>%
+  mutate(maxMETvalue = max(METs)) %>%
+  slice(which.max(METs))
+
+ggplot(highestMETs, aes(x = maxMETvalue, color = Id, binwidth = 30)) + geom_histogram() +
+  labs(title="MET Values", x="Date", y="Highest MET Achieved") +
+  facet_wrap(~Id) 
+ ## This would be the maximum MET achieved during everyday plotted in a histogram to
+ ##take a look at the distribution in search of a recognizable pattern. 
+
+ ## Nothing jumps out at me at this stage, but I do notice that users who performed very intensive
+ ## exercise tend to slow down on the days after, suggesting that they may take a couple days off, or
+ ## even that some users tend to drop off drastically, in terms of consistency, after a burst of high
+ ##intensity activities.
+
+
+
+```
+
+Now, I'll plot the actual times of when the highest MET achieved was recorded.
+
+```{r Plotting time of highest MET achieved.}
+
+##For some reason, the time column has been transformed back into a character type, so I will fix this.
+
+ggplot(highestMETs, aes(x=date, y=time, group = Id, color = Id)) + geom_line() +
+  labs(title="Time stamp of highet MET Values", x="Times of max intensities", y="Count")
+
+
+
+
+```
+
+
+
+
+
